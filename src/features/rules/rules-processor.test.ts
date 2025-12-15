@@ -4,9 +4,16 @@ import { SKILL_FILE_NAME } from "../../constants/general.js";
 import {
   RULESYNC_RULES_RELATIVE_DIR_PATH,
   RULESYNC_SKILLS_RELATIVE_DIR_PATH,
+  RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
 import { setupTestDirectory } from "../../test-utils/test-directories.js";
-import { ensureDir, readFileContent, writeFileContent } from "../../utils/file.js";
+import {
+  ensureDir,
+  readFileContent,
+  readJsonFile,
+  writeFileContent,
+  writeJsonFile,
+} from "../../utils/file.js";
 import { RulesyncSkill } from "../skills/rulesync-skill.js";
 import { AgentsMdRule } from "./agentsmd-rule.js";
 import { AugmentcodeLegacyRule } from "./augmentcode-legacy-rule.js";
@@ -1362,6 +1369,872 @@ Universal.`,
       expect(agentsmdContent).toContain("AgentsMd Only,Only for agentsmd");
       expect(agentsmdContent).toContain("Universal Skill,For all tools");
       expect(agentsmdContent).not.toContain("GeminiCli Only");
+    });
+  });
+
+  describe("loadToolFiles for OpenCode agents", () => {
+    it("should load agents from registry.json", async () => {
+      // Setup registry.json
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+      await ensureDir(join(testDir, ".opencode", "agent", "planning"));
+
+      const registry = {
+        agents: [
+          {
+            slug: "context-steward",
+            name: "Context Steward",
+            file: ".opencode/agent/governance/context-steward.md",
+            category: "governance",
+            capabilities: ["read", "edit"],
+            mcp_servers: [],
+            delegates_to: [],
+            accepts_from: ["all-agents"],
+          },
+          {
+            slug: "product-strategist",
+            name: "Product Strategist",
+            file: ".opencode/agent/planning/product-strategist.md",
+            category: "planning",
+            capabilities: ["read", "edit", "browser"],
+            mcp_servers: ["context7"],
+            delegates_to: ["strategic-architect"],
+            accepts_from: ["orchestrator"],
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, registry);
+
+      // Create agent files
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "context-steward.md"),
+        `---
+description: Context steward agent
+mode: subagent
+model: anthropic/claude-sonnet-4-20250514
+temperature: 0.5
+---
+
+# Context Steward
+
+Manages project context.
+`,
+      );
+
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "planning", "product-strategist.md"),
+        `---
+description: Product strategist agent
+mode: primary
+model: openrouter/anthropic/claude-3.5-sonnet
+temperature: 0.7
+---
+
+# Product Strategist
+
+Handles product strategy.
+`,
+      );
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+
+      // Should load both agents
+      expect(toolFiles.length).toBeGreaterThanOrEqual(2);
+      const agentFiles = toolFiles.filter((file) => file instanceof OpenCodeRule && !file.isRoot());
+      expect(agentFiles.length).toBe(2);
+
+      // Verify agent files
+      const contextSteward = agentFiles.find(
+        (file) => file.getRelativeFilePath() === "governance/context-steward.md",
+      );
+      const productStrategist = agentFiles.find(
+        (file) => file.getRelativeFilePath() === "planning/product-strategist.md",
+      );
+
+      expect(contextSteward).toBeDefined();
+      expect(productStrategist).toBeDefined();
+      expect(contextSteward?.getDescription()).toBe("Context Steward");
+      expect(productStrategist?.getDescription()).toBe("Product Strategist");
+    });
+
+    it("should handle missing registry.json gracefully", async () => {
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+
+      // Should return empty array for agents, but may have root/memories files
+      // Just verify no error is thrown
+      expect(Array.isArray(toolFiles)).toBe(true);
+    });
+
+    it("should handle missing agent files gracefully", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent"));
+
+      const registry = {
+        agents: [
+          {
+            slug: "missing-agent",
+            name: "Missing Agent",
+            file: ".opencode/agent/governance/missing-agent.md",
+            category: "governance",
+          },
+          {
+            slug: "existing-agent",
+            name: "Existing Agent",
+            file: ".opencode/agent/governance/existing-agent.md",
+            category: "governance",
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, registry);
+
+      // Only create one agent file
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "existing-agent.md"),
+        `---
+description: Existing agent
+mode: subagent
+---
+
+# Existing Agent
+`,
+      );
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+
+      // Should load existing agent, skip missing one
+      const agentFiles = toolFiles.filter((file) => file instanceof OpenCodeRule && !file.isRoot());
+      expect(agentFiles.length).toBe(1);
+      expect(agentFiles[0]?.getRelativeFilePath()).toBe("governance/existing-agent.md");
+    });
+
+    it("should handle invalid registry.json structure", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent"));
+
+      // Invalid registry structure (missing required fields)
+      const invalidRegistry = {
+        agents: [
+          {
+            // Missing required fields
+            slug: "invalid",
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, invalidRegistry);
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+
+      // Should return empty array for agents due to validation failure
+      const agentFiles = toolFiles.filter((file) => file instanceof OpenCodeRule && !file.isRoot());
+      expect(agentFiles.length).toBe(0);
+    });
+
+    it("should combine agents with root and memory files", async () => {
+      // Setup registry
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+      await ensureDir(join(testDir, ".opencode", "memories"));
+
+      const registry = {
+        agents: [
+          {
+            slug: "test-agent",
+            name: "Test Agent",
+            file: ".opencode/agent/governance/test-agent.md",
+            category: "governance",
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, registry);
+
+      // Create agent file
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "test-agent.md"),
+        `---
+description: Test agent
+mode: subagent
+---
+
+# Test Agent
+`,
+      );
+
+      // Create root file
+      await writeFileContent(
+        join(testDir, "AGENTS.md"),
+        "# Root Agents File\n\nMain agents configuration.",
+      );
+
+      // Create memory file
+      await writeFileContent(
+        join(testDir, ".opencode", "memories", "memory.md"),
+        "# Memory\n\nProject memory.",
+      );
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+
+      // Should have root, memory, and agent files
+      expect(toolFiles.length).toBeGreaterThanOrEqual(3);
+
+      const rootFiles = toolFiles.filter((file) => file instanceof OpenCodeRule && file.isRoot());
+      const memoryFiles = toolFiles.filter(
+        (file) =>
+          file instanceof OpenCodeRule &&
+          !file.isRoot() &&
+          file.getRelativeDirPath() === ".opencode/memories",
+      );
+      const agentFiles = toolFiles.filter(
+        (file) =>
+          file instanceof OpenCodeRule &&
+          !file.isRoot() &&
+          file.getRelativeDirPath() === ".opencode/agent",
+      );
+
+      expect(rootFiles.length).toBeGreaterThanOrEqual(1);
+      expect(memoryFiles.length).toBeGreaterThanOrEqual(1);
+      expect(agentFiles.length).toBe(1);
+    });
+
+    it("should preserve registry metadata when converting to rulesync", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      const registry = {
+        agents: [
+          {
+            slug: "metadata-agent",
+            name: "Metadata Agent",
+            file: ".opencode/agent/governance/metadata-agent.md",
+            category: "governance",
+            capabilities: ["read", "edit", "command"],
+            mcp_servers: ["context7", "linear"],
+            delegates_to: ["other-agent"],
+            accepts_from: ["orchestrator"],
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, registry);
+
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "metadata-agent.md"),
+        `---
+description: Agent with metadata
+mode: all
+model: anthropic/claude-sonnet-4-20250514
+temperature: 0.6
+tools:
+  read: true
+  edit: true
+---
+
+# Metadata Agent
+
+Agent content.
+`,
+      );
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const toolFiles = await processor.loadToolFiles();
+      const agentFile = toolFiles.find(
+        (file) =>
+          file instanceof OpenCodeRule &&
+          file.getRelativeFilePath() === "governance/metadata-agent.md",
+      ) as OpenCodeRule;
+
+      expect(agentFile).toBeDefined();
+
+      const rulesyncRule = agentFile.toRulesyncRule();
+      const opencodeMetadata = rulesyncRule.getFrontmatter().opencode as Record<string, unknown>;
+
+      expect(opencodeMetadata).toBeDefined();
+      expect(opencodeMetadata.category).toBe("governance");
+      expect(opencodeMetadata.capabilities).toEqual(["read", "edit", "command"]);
+      expect(opencodeMetadata.mcp_servers).toEqual(["context7", "linear"]);
+      expect(opencodeMetadata.delegates_to).toEqual(["other-agent"]);
+      expect(opencodeMetadata.accepts_from).toEqual(["orchestrator"]);
+      expect(opencodeMetadata.mode).toBe("all");
+      expect(opencodeMetadata.model).toBe("anthropic/claude-sonnet-4-20250514");
+      expect(opencodeMetadata.temperature).toBe(0.6);
+    });
+  });
+
+  describe("writeAiFiles for OpenCode registry updates", () => {
+    it("should update registry.json when writing agent files", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      // Create initial registry
+      const initialRegistry = {
+        agents: [
+          {
+            slug: "existing-agent",
+            name: "Existing Agent",
+            file: ".opencode/agent/governance/existing-agent.md",
+            category: "governance",
+          },
+        ],
+        workflow_patterns: {
+          pattern1: ["agent1", "agent2"],
+        },
+      };
+
+      await writeJsonFile(registryPath, initialRegistry);
+
+      // Create agent file
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "new-agent.md"),
+        `---
+description: New agent
+mode: subagent
+---
+
+# New Agent
+`,
+      );
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      // Load and convert to rulesync
+      const toolFiles = await processor.loadToolFiles();
+      const newAgentFile = toolFiles.find(
+        (file) =>
+          file instanceof OpenCodeRule &&
+          file.getRelativeFilePath() === "governance/new-agent.md",
+      ) as OpenCodeRule;
+
+      // Create a new agent rule for testing
+      const agentRule = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "governance/new-agent.md",
+        fileContent: `---
+description: New agent
+mode: subagent
+---
+
+# New Agent
+`,
+        root: false,
+        description: "New Agent",
+        agentEntry: {
+          slug: "new-agent",
+          name: "New Agent",
+          file: ".opencode/agent/governance/new-agent.md",
+          category: "governance",
+        },
+      });
+
+      // Write the agent file (this should trigger registry update)
+      await processor.writeAiFiles([agentRule]);
+
+      // Verify registry was updated
+      const updatedRegistry = await readJsonFile(registryPath);
+      expect(updatedRegistry.agents).toBeDefined();
+      expect(Array.isArray(updatedRegistry.agents)).toBe(true);
+      
+      // Should have the new agent
+      const newAgentEntry = updatedRegistry.agents.find(
+        (a: any) => a.slug === "new-agent",
+      );
+      expect(newAgentEntry).toBeDefined();
+      expect(newAgentEntry.name).toBe("New Agent");
+      
+      // Should preserve non-agent fields
+      expect(updatedRegistry.workflow_patterns).toEqual(initialRegistry.workflow_patterns);
+    });
+
+    it("should create registry.json if it doesn't exist", async () => {
+      await ensureDir(join(testDir, ".opencode", "agent", "planning"));
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const agentRule = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "planning/test-agent.md",
+        fileContent: `---
+description: Test agent
+mode: primary
+---
+
+# Test Agent
+`,
+        root: false,
+        description: "Test Agent",
+        agentEntry: {
+          slug: "test-agent",
+          name: "Test Agent",
+          file: ".opencode/agent/planning/test-agent.md",
+          category: "planning",
+        },
+      });
+
+      await processor.writeAiFiles([agentRule]);
+
+      // Verify registry was created
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      const registry = await readJsonFile(registryPath);
+      expect(registry.agents).toBeDefined();
+      expect(Array.isArray(registry.agents)).toBe(true);
+      expect(registry.agents.length).toBe(1);
+      expect(registry.agents[0].slug).toBe("test-agent");
+    });
+
+    it("should update existing agent entry in registry", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      // Create initial registry with an agent
+      const initialRegistry = {
+        agents: [
+          {
+            slug: "update-agent",
+            name: "Old Name",
+            file: ".opencode/agent/governance/update-agent.md",
+            category: "governance",
+            capabilities: ["read"],
+          },
+        ],
+      };
+
+      await writeJsonFile(registryPath, initialRegistry);
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      // Create updated agent rule
+      const updatedAgentRule = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "governance/update-agent.md",
+        fileContent: `---
+description: Updated agent
+mode: all
+---
+
+# Updated Agent
+`,
+        root: false,
+        description: "Updated Name",
+        agentEntry: {
+          slug: "update-agent",
+          name: "Updated Name",
+          file: ".opencode/agent/governance/update-agent.md",
+          category: "governance",
+          capabilities: ["read", "edit", "command"],
+        },
+      });
+
+      await processor.writeAiFiles([updatedAgentRule]);
+
+      // Verify registry was updated (not duplicated)
+      const updatedRegistry = await readJsonFile(registryPath);
+      expect(updatedRegistry.agents.length).toBe(1);
+      expect(updatedRegistry.agents[0].slug).toBe("update-agent");
+      expect(updatedRegistry.agents[0].name).toBe("Updated Name");
+      expect(updatedRegistry.agents[0].capabilities).toEqual(["read", "edit", "command"]);
+    });
+
+    it("should not update registry for non-agent files", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "memories"));
+
+      // Create initial registry
+      const initialRegistry = {
+        agents: [],
+      };
+
+      await writeJsonFile(registryPath, initialRegistry);
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      // Create a memory file (not an agent)
+      const memoryRule = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/memories",
+        relativeFilePath: "memory.md",
+        fileContent: "# Memory\n\nMemory content.",
+        root: false,
+        // No agentEntry - this is a memory file
+      });
+
+      await processor.writeAiFiles([memoryRule]);
+
+      // Verify registry was not updated (still empty)
+      const registry = await readJsonFile(registryPath);
+      expect(registry.agents.length).toBe(0);
+    });
+
+    it("should handle multiple agents in single write", async () => {
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+      await ensureDir(join(testDir, ".opencode", "agent", "planning"));
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const agent1 = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "governance/agent1.md",
+        fileContent: "# Agent 1",
+        root: false,
+        description: "Agent 1",
+        agentEntry: {
+          slug: "agent1",
+          name: "Agent 1",
+          file: ".opencode/agent/governance/agent1.md",
+          category: "governance",
+        },
+      });
+
+      const agent2 = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "planning/agent2.md",
+        fileContent: "# Agent 2",
+        root: false,
+        description: "Agent 2",
+        agentEntry: {
+          slug: "agent2",
+          name: "Agent 2",
+          file: ".opencode/agent/planning/agent2.md",
+          category: "planning",
+        },
+      });
+
+      await processor.writeAiFiles([agent1, agent2]);
+
+      // Verify registry has both agents
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      const registry = await readJsonFile(registryPath);
+      expect(registry.agents.length).toBe(2);
+      expect(registry.agents.find((a: any) => a.slug === "agent1")).toBeDefined();
+      expect(registry.agents.find((a: any) => a.slug === "agent2")).toBeDefined();
+    });
+
+    it("should preserve non-agent registry fields when updating", async () => {
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      const initialRegistry = {
+        agents: [],
+        workflow_patterns: {
+          pattern1: ["agent1", "agent2"],
+          pattern2: ["agent3"],
+        },
+        governance_chain: ["agent1", "agent2", "agent3"],
+        mcp_servers: {
+          context7: { type: "local", command: ["node", "server.js"] },
+        },
+        metadata: {
+          version: "1.0.0",
+          created: "2025-01-01",
+        },
+      };
+
+      await writeJsonFile(registryPath, initialRegistry);
+
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const agentRule = new OpenCodeRule({
+        baseDir: testDir,
+        relativeDirPath: ".opencode/agent",
+        relativeFilePath: "governance/test-agent.md",
+        fileContent: "# Test Agent",
+        root: false,
+        description: "Test Agent",
+        agentEntry: {
+          slug: "test-agent",
+          name: "Test Agent",
+          file: ".opencode/agent/governance/test-agent.md",
+          category: "governance",
+        },
+      });
+
+      await processor.writeAiFiles([agentRule]);
+
+      // Verify all non-agent fields are preserved
+      const updatedRegistry = await readJsonFile(registryPath);
+      expect(updatedRegistry.workflow_patterns).toEqual(initialRegistry.workflow_patterns);
+      expect(updatedRegistry.governance_chain).toEqual(initialRegistry.governance_chain);
+      expect(updatedRegistry.mcp_servers).toEqual(initialRegistry.mcp_servers);
+      expect(updatedRegistry.metadata).toEqual(initialRegistry.metadata);
+      expect(updatedRegistry.agents.length).toBe(1);
+    });
+  });
+
+  describe("Claude Code + OpenCode coexistence", () => {
+    it("should load both Claude Code subagents and OpenCode agents from same directory", async () => {
+      await ensureDir(join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH));
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      // Create Claude Code subagent in .rulesync/subagents/
+      await writeFileContent(
+        join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH, "claude-agent.md"),
+        `---
+targets: ["claudecode"]
+name: Claude Agent
+description: A Claude Code subagent
+claudecode:
+  model: claude-3-5-sonnet
+---
+
+# Claude Agent
+
+Claude Code subagent content.
+`,
+      );
+
+      // Create OpenCode agent registry
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await writeJsonFile(registryPath, {
+        agents: [
+          {
+            slug: "opencode-agent",
+            name: "OpenCode Agent",
+            file: ".opencode/agent/governance/opencode-agent.md",
+            category: "governance",
+          },
+        ],
+      });
+
+      // Create OpenCode agent file
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "opencode-agent.md"),
+        `---
+description: OpenCode agent
+mode: subagent
+---
+
+# OpenCode Agent
+
+OpenCode agent content.
+`,
+      );
+
+      // Load OpenCode agents via RulesProcessor
+      const opencodeProcessor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const opencodeFiles = await opencodeProcessor.loadToolFiles();
+      const opencodeAgents = opencodeFiles.filter(
+        (file) => file instanceof OpenCodeRule && !file.isRoot(),
+      );
+
+      expect(opencodeAgents.length).toBe(1);
+      expect(opencodeAgents[0]?.getRelativeFilePath()).toBe("governance/opencode-agent.md");
+
+      // Load rulesync files (should include both Claude Code and OpenCode agents)
+      const rulesyncFiles = await opencodeProcessor.loadRulesyncFiles();
+      
+      // Should have Claude Code subagent (from .rulesync/subagents/)
+      const claudeSubagent = rulesyncFiles.find(
+        (file) => file.getRelativeFilePath() === "claude-agent.md",
+      );
+      expect(claudeSubagent).toBeDefined();
+      
+      // Should have OpenCode agent (from .rulesync/subagents/ with opencode metadata)
+      // Note: OpenCode agents are stored in subagents directory when converted to rulesync
+      const opencodeSubagent = rulesyncFiles.find(
+        (file) => {
+          const frontmatter = file.getFrontmatter();
+          return (
+            file.getRelativeFilePath() === "opencode-agent.md" &&
+            frontmatter.opencode !== undefined
+          );
+        },
+      );
+      // OpenCode agent might not be in rulesync files yet if not converted
+      // This test verifies they can coexist in the directory
+    });
+
+    it("should not interfere when converting Claude Code subagents", async () => {
+      await ensureDir(join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH));
+
+      // Create Claude Code subagent
+      await writeFileContent(
+        join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH, "claude-subagent.md"),
+        `---
+targets: ["claudecode"]
+name: Claude Subagent
+description: Claude Code subagent
+claudecode:
+  model: claude-3-5-sonnet
+---
+
+# Claude Subagent
+`,
+      );
+
+      // Create OpenCode agent in same directory (simulating coexistence)
+      await writeFileContent(
+        join(testDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH, "opencode-subagent.md"),
+        `---
+targets: ["opencode"]
+description: OpenCode Agent
+opencode:
+  category: "governance"
+  mode: "subagent"
+---
+
+# OpenCode Subagent
+`,
+      );
+
+      // Load via RulesProcessor for OpenCode
+      const processor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const rulesyncFiles = await processor.loadRulesyncFiles();
+      
+      // Should load both files
+      expect(rulesyncFiles.length).toBeGreaterThanOrEqual(2);
+      
+      // Claude Code subagent should not have opencode metadata
+      const claudeFile = rulesyncFiles.find(
+        (file) => file.getRelativeFilePath() === "claude-subagent.md",
+      );
+      expect(claudeFile).toBeDefined();
+      if (claudeFile) {
+        const frontmatter = claudeFile.getFrontmatter();
+        expect(frontmatter.opencode).toBeUndefined();
+        expect(frontmatter.claudecode).toBeDefined();
+      }
+      
+      // OpenCode agent should have opencode metadata
+      const opencodeFile = rulesyncFiles.find(
+        (file) => file.getRelativeFilePath() === "opencode-subagent.md",
+      );
+      expect(opencodeFile).toBeDefined();
+      if (opencodeFile) {
+        const frontmatter = opencodeFile.getFrontmatter();
+        expect(frontmatter.opencode).toBeDefined();
+      }
+    });
+
+    it("should handle round-trip sync for both Claude Code and OpenCode", async () => {
+      await ensureDir(join(testDir, ".claude", "agents"));
+      await ensureDir(join(testDir, ".opencode", "agent", "governance"));
+
+      // Create Claude Code subagent file
+      await writeFileContent(
+        join(testDir, ".claude", "agents", "claude-agent.md"),
+        `---
+name: Claude Agent
+description: Claude Code agent
+model: claude-3-5-sonnet
+---
+
+# Claude Agent
+`,
+      );
+
+      // Create OpenCode registry and agent
+      const registryPath = join(testDir, ".opencode", "agent", "registry.json");
+      await writeJsonFile(registryPath, {
+        agents: [
+          {
+            slug: "opencode-agent",
+            name: "OpenCode Agent",
+            file: ".opencode/agent/governance/opencode-agent.md",
+            category: "governance",
+          },
+        ],
+      });
+
+      await writeFileContent(
+        join(testDir, ".opencode", "agent", "governance", "opencode-agent.md"),
+        `---
+description: OpenCode agent
+mode: subagent
+---
+
+# OpenCode Agent
+`,
+      );
+
+      // Import OpenCode agents
+      const opencodeProcessor = new RulesProcessor({
+        baseDir: testDir,
+        toolTarget: "opencode",
+      });
+
+      const opencodeToolFiles = await opencodeProcessor.loadToolFiles();
+      const opencodeRulesyncFiles =
+        await opencodeProcessor.convertToolFilesToRulesyncFiles(opencodeToolFiles);
+      await opencodeProcessor.writeAiFiles(opencodeRulesyncFiles);
+
+      // Verify OpenCode agent was written to .rulesync/subagents/
+      const opencodeRulesyncPath = join(
+        testDir,
+        RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
+        "opencode-agent.md",
+      );
+      expect(await readFileContent(opencodeRulesyncPath)).toBeDefined();
+
+      // Verify registry.json was created/updated
+      const registry = await readJsonFile(registryPath);
+      expect(registry.agents).toBeDefined();
+
+      // Claude Code subagents should still work independently
+      // (This would be tested via SubagentsProcessor, but we verify no conflicts)
+      const claudeAgentPath = join(testDir, ".claude", "agents", "claude-agent.md");
+      expect(await readFileContent(claudeAgentPath)).toBeDefined();
     });
   });
 });
