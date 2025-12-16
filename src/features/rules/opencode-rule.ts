@@ -20,7 +20,6 @@ export type OpenCodeRuleSettablePaths = Omit<ToolRuleSettablePaths, "root"> & {
 };
 
 export class OpenCodeRule extends ToolRule {
-
   static getSettablePaths(): OpenCodeRuleSettablePaths {
     return {
       root: {

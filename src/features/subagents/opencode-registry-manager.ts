@@ -86,10 +86,10 @@ export class OpenCodeRegistryManager {
       logger.debug(
         `Updated registry.json at ${this.registryPath} with ${registry.agents.length} agents`,
       );
-      } catch (error) {
-        logger.error(`Failed to write registry.json: ${error}`);
-        throw new Error(`Failed to write registry.json: ${error}`, { cause: error });
-      }
+    } catch (error) {
+      logger.error(`Failed to write registry.json: ${error}`);
+      throw new Error(`Failed to write registry.json: ${error}`, { cause: error });
+    }
   }
 
   async updateAndWriteRegistry(agentSubagents: OpenCodeSubagent[]): Promise<void> {
