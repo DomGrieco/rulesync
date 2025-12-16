@@ -8,14 +8,13 @@ import {
   RULESYNC_RULES_RELATIVE_DIR_PATH,
   RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
-import { FeatureProcessor } from "../../types/feature-processor.js";
 import { AiFile } from "../../types/ai-file.js";
+import { FeatureProcessor } from "../../types/feature-processor.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
 import { ToolFile } from "../../types/tool-file.js";
 import { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
-import { findFilesByGlobs, readFileContent, readJsonFile } from "../../utils/file.js";
-import { parseFrontmatter } from "../../utils/frontmatter.js";
+import { findFilesByGlobs } from "../../utils/file.js";
 import { logger } from "../../utils/logger.js";
 import { AgentsmdCommand } from "../commands/agentsmd-command.js";
 import { CommandsProcessor } from "../commands/commands-processor.js";
@@ -52,11 +51,6 @@ import { GeminiCliRule } from "./geminicli-rule.js";
 import { JunieRule } from "./junie-rule.js";
 import { KiroRule } from "./kiro-rule.js";
 import { OpenCodeRule } from "./opencode-rule.js";
-import type {
-  OpenCodeAgentRegistry,
-  OpenCodeAgentRegistryEntry,
-} from "./opencode-agent-registry.js";
-import { OpenCodeRegistryManager } from "./opencode-registry-manager.js";
 import { QwencodeRule } from "./qwencode-rule.js";
 import { RooRule } from "./roo-rule.js";
 import { RulesyncRule } from "./rulesync-rule.js";
@@ -616,27 +610,6 @@ export class RulesProcessor extends FeatureProcessor {
       files.map((file) => RulesyncRule.fromFile({ relativeFilePath: basename(file) })),
     );
 
-    if (this.toolTarget === "opencode") {
-      const subagentFiles = await findFilesByGlobs(
-        join(this.baseDir, RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH, "*.md"),
-      );
-      logger.debug(`Found ${subagentFiles.length} subagent files for OpenCode`);
-      const subagentRules = await Promise.all(
-        subagentFiles.map(async (file) => {
-          const content = await readFileContent(file);
-          const { frontmatter, body } = parseFrontmatter(content);
-          return new RulesyncRule({
-            baseDir: this.baseDir,
-            relativeDirPath: RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
-            relativeFilePath: basename(file),
-            frontmatter: frontmatter,
-            body,
-          });
-        }),
-      );
-      rulesyncRules.push(...subagentRules);
-    }
-
     const rootRules = rulesyncRules.filter((rule) => rule.getFrontmatter().root);
 
     // A root file should be only one
@@ -666,104 +639,6 @@ export class RulesProcessor extends FeatureProcessor {
     );
   }
 
-  private validateRegistryEntry(entry: unknown): entry is OpenCodeAgentRegistryEntry {
-    if (!entry || typeof entry !== "object") {
-      return false;
-    }
-    const e = entry as Record<string, unknown>;
-    
-    if (typeof e.slug !== "string" || e.slug.length === 0) {
-      return false;
-    }
-    if (typeof e.name !== "string" || e.name.length === 0) {
-      return false;
-    }
-    if (typeof e.file !== "string" || e.file.length === 0) {
-      return false;
-    }
-    if (typeof e.category !== "string") {
-      return false;
-    }
-    
-    if (e.capabilities !== undefined && !Array.isArray(e.capabilities)) {
-      return false;
-    }
-    if (e.mcp_servers !== undefined && !Array.isArray(e.mcp_servers)) {
-      return false;
-    }
-    if (e.delegates_to !== undefined && !Array.isArray(e.delegates_to)) {
-      return false;
-    }
-    if (e.accepts_from !== undefined && !Array.isArray(e.accepts_from)) {
-      return false;
-    }
-    
-    if (Array.isArray(e.capabilities) && !e.capabilities.every((item) => typeof item === "string")) {
-      return false;
-    }
-    if (Array.isArray(e.mcp_servers) && !e.mcp_servers.every((item) => typeof item === "string")) {
-      return false;
-    }
-    if (Array.isArray(e.delegates_to) && !e.delegates_to.every((item) => typeof item === "string")) {
-      return false;
-    }
-    if (Array.isArray(e.accepts_from) && !e.accepts_from.every((item) => typeof item === "string")) {
-      return false;
-    }
-    
-    return true;
-  }
-
-  private async loadOpenCodeAgentFiles(): Promise<ToolFile[]> {
-    const registryPath = join(this.baseDir, ".opencode", "agent", "registry.json");
-
-    try {
-      const registryData = await readJsonFile<OpenCodeAgentRegistry>(registryPath);
-      
-      if (!registryData || !Array.isArray(registryData.agents)) {
-        logger.warn(
-          `Invalid registry.json structure at ${registryPath}: missing or invalid 'agents' array`,
-        );
-        return [];
-      }
-
-      const registry = registryData as OpenCodeAgentRegistry;
-      const agentRules: ToolFile[] = [];
-
-      for (const agentEntry of registry.agents) {
-        if (!this.validateRegistryEntry(agentEntry)) {
-          logger.warn(
-            `Invalid registry entry structure at ${registryPath}: entry missing required fields or has invalid structure. Skipping.`,
-          );
-          continue;
-        }
-        
-        try {
-          const agentRule = await OpenCodeRule.fromAgent({
-            baseDir: this.baseDir,
-            agentEntry,
-            validate: true,
-          });
-          agentRules.push(agentRule);
-        } catch (error) {
-          logger.warn(
-            `Failed to load agent file ${agentEntry.file}: ${formatError(error)}. Skipping.`,
-          );
-        }
-      }
-
-      logger.debug(`Loaded ${agentRules.length} agent files from registry.json`);
-      return agentRules;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        logger.debug(`Registry.json not found at ${registryPath}. Skipping agent loading.`);
-        return [];
-      }
-      logger.warn(`Failed to load OpenCode agent registry: ${formatError(error)}`);
-      return [];
-    }
-  }
-
   /**
    * Implementation of abstract method from FeatureProcessor
    * Load tool-specific rule configurations and parse them into ToolRule instances
@@ -777,60 +652,6 @@ export class RulesProcessor extends FeatureProcessor {
       const factory = this.getFactory(this.toolTarget);
       const settablePaths = factory.class.getSettablePaths({ global: this.global });
 
-      if (this.toolTarget === "opencode") {
-        const agentRules = await this.loadOpenCodeAgentFiles();
-        logger.debug(`Found ${agentRules.length} agent files from registry`);
-
-        const rootToolRules = await (async () => {
-          if (!settablePaths.root) {
-            return [];
-          }
-
-          const rootFilePaths = await findFilesByGlobs(
-            join(
-              this.baseDir,
-              settablePaths.root.relativeDirPath ?? ".",
-              settablePaths.root.relativeFilePath,
-            ),
-          );
-          return await Promise.all(
-            rootFilePaths.map((filePath) =>
-              factory.class.fromFile({
-                baseDir: this.baseDir,
-                relativeFilePath: basename(filePath),
-                global: this.global,
-              }),
-            ),
-          );
-        })();
-        logger.debug(`Found ${rootToolRules.length} root tool rule files`);
-
-        const nonRootToolRules = await (async () => {
-          if (!settablePaths.nonRoot) {
-            return [];
-          }
-
-          const nonRootFilePaths = await findFilesByGlobs(
-            join(
-              this.baseDir,
-              settablePaths.nonRoot.relativeDirPath,
-              `*.${factory.meta.extension}`,
-            ),
-          );
-          return await Promise.all(
-            nonRootFilePaths.map((filePath) =>
-              factory.class.fromFile({
-                baseDir: this.baseDir,
-                relativeFilePath: basename(filePath),
-                global: this.global,
-              }),
-            ),
-          );
-        })();
-        logger.debug(`Found ${nonRootToolRules.length} non-root tool rule files`);
-
-        return [...rootToolRules, ...nonRootToolRules, ...agentRules];
-      }
       const rootToolRules = await (async () => {
         if (!settablePaths.root) {
           return [];
@@ -1059,28 +880,6 @@ ${toonContent}`;
   }
 
   async writeAiFiles(aiFiles: AiFile[]): Promise<number> {
-    const writtenCount = await super.writeAiFiles(aiFiles);
-
-    if (this.toolTarget === "opencode") {
-      try {
-        const agentRules = aiFiles.filter((file): file is OpenCodeRule => {
-          if (!(file instanceof OpenCodeRule)) {
-            return false;
-          }
-          const rule = file as any;
-          return rule.agentEntry !== undefined;
-        });
-
-        if (agentRules.length > 0) {
-          const registryManager = new OpenCodeRegistryManager(this.baseDir);
-          await registryManager.updateAndWriteRegistry(agentRules);
-          logger.debug(`Updated registry.json with ${agentRules.length} agent entries`);
-        }
-      } catch (error) {
-        logger.warn(`Failed to update registry.json: ${formatError(error)}`);
-      }
-    }
-
-    return writtenCount;
+    return await super.writeAiFiles(aiFiles);
   }
 }

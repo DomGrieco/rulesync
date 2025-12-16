@@ -1,11 +1,17 @@
 import { basename, join } from "node:path";
 import { z } from "zod/mini";
+import { AiFile } from "../../types/ai-file.js";
 import { FeatureProcessor } from "../../types/feature-processor.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
 import { ToolFile } from "../../types/tool-file.js";
 import type { ToolTarget } from "../../types/tool-targets.js";
 import { formatError } from "../../utils/error.js";
-import { directoryExists, findFilesByGlobs, listDirectoryFiles } from "../../utils/file.js";
+import {
+  directoryExists,
+  findFilesByGlobs,
+  listDirectoryFiles,
+  readJsonFile,
+} from "../../utils/file.js";
 import { logger } from "../../utils/logger.js";
 import { AgentsmdSubagent } from "./agentsmd-subagent.js";
 import { ClaudecodeSubagent } from "./claudecode-subagent.js";
@@ -13,6 +19,12 @@ import { CodexCliSubagent } from "./codexcli-subagent.js";
 import { CopilotSubagent } from "./copilot-subagent.js";
 import { CursorSubagent } from "./cursor-subagent.js";
 import { GeminiCliSubagent } from "./geminicli-subagent.js";
+import type {
+  OpenCodeAgentRegistry,
+  OpenCodeAgentRegistryEntry,
+} from "./opencode-agent-registry.js";
+import { OpenCodeRegistryManager } from "./opencode-registry-manager.js";
+import { OpenCodeSubagent } from "./opencode-subagent.js";
 import { RooSubagent } from "./roo-subagent.js";
 import { RulesyncSubagent } from "./rulesync-subagent.js";
 import { SimulatedSubagent } from "./simulated-subagent.js";
@@ -53,6 +65,7 @@ const subagentsProcessorToolTargetTuple = [
   "copilot",
   "cursor",
   "geminicli",
+  "opencode",
   "roo",
 ] as const;
 
@@ -83,6 +96,10 @@ const toolSubagentFactories = new Map<SubagentsProcessorToolTarget, ToolSubagent
   [
     "geminicli",
     { class: GeminiCliSubagent, meta: { supportsSimulated: true, supportsGlobal: false } },
+  ],
+  [
+    "opencode",
+    { class: OpenCodeSubagent, meta: { supportsSimulated: false, supportsGlobal: false } },
   ],
   ["roo", { class: RooSubagent, meta: { supportsSimulated: true, supportsGlobal: false } }],
 ]);
@@ -248,6 +265,113 @@ export class SubagentsProcessor extends FeatureProcessor {
     return rulesyncSubagents;
   }
 
+  private validateRegistryEntry(entry: unknown): entry is OpenCodeAgentRegistryEntry {
+    if (!entry || typeof entry !== "object") {
+      return false;
+    }
+    const e = entry as Record<string, unknown>;
+
+    if (typeof e.slug !== "string" || e.slug.length === 0) {
+      return false;
+    }
+    if (typeof e.name !== "string" || e.name.length === 0) {
+      return false;
+    }
+    if (typeof e.file !== "string" || e.file.length === 0) {
+      return false;
+    }
+    if (typeof e.category !== "string") {
+      return false;
+    }
+
+    if (e.capabilities !== undefined && !Array.isArray(e.capabilities)) {
+      return false;
+    }
+    if (e.mcp_servers !== undefined && !Array.isArray(e.mcp_servers)) {
+      return false;
+    }
+    if (e.delegates_to !== undefined && !Array.isArray(e.delegates_to)) {
+      return false;
+    }
+    if (e.accepts_from !== undefined && !Array.isArray(e.accepts_from)) {
+      return false;
+    }
+
+    if (
+      Array.isArray(e.capabilities) &&
+      !e.capabilities.every((item) => typeof item === "string")
+    ) {
+      return false;
+    }
+    if (Array.isArray(e.mcp_servers) && !e.mcp_servers.every((item) => typeof item === "string")) {
+      return false;
+    }
+    if (
+      Array.isArray(e.delegates_to) &&
+      !e.delegates_to.every((item) => typeof item === "string")
+    ) {
+      return false;
+    }
+    if (
+      Array.isArray(e.accepts_from) &&
+      !e.accepts_from.every((item) => typeof item === "string")
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private async loadOpenCodeAgentFiles(): Promise<ToolFile[]> {
+    const registryPath = join(this.baseDir, ".opencode", "agent", "registry.json");
+
+    try {
+      const registryData = await readJsonFile<OpenCodeAgentRegistry>(registryPath);
+
+      if (!registryData || !Array.isArray(registryData.agents)) {
+        logger.warn(
+          `Invalid registry.json structure at ${registryPath}: missing or invalid 'agents' array`,
+        );
+        return [];
+      }
+
+      const registry = registryData as OpenCodeAgentRegistry;
+      const agentSubagents: ToolFile[] = [];
+
+      for (const agentEntry of registry.agents) {
+        if (!this.validateRegistryEntry(agentEntry)) {
+          logger.warn(
+            `Invalid registry entry structure at ${registryPath}: entry missing required fields or has invalid structure. Skipping.`,
+          );
+          continue;
+        }
+
+        try {
+          const agentSubagent = await OpenCodeSubagent.fromAgent({
+            baseDir: this.baseDir,
+            agentEntry,
+            validate: true,
+          });
+          agentSubagents.push(agentSubagent);
+        } catch (error) {
+          logger.warn(
+            `Failed to load agent file ${agentEntry.file}: ${formatError(error)}. Skipping.`,
+          );
+        }
+      }
+
+      logger.debug(`Loaded ${agentSubagents.length} agent files from registry.json`);
+      return agentSubagents;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        logger.debug(`Registry.json not found at ${registryPath}. Skipping agent loading.`);
+        return [];
+      }
+      logger.warn(`Failed to load OpenCode agent registry: ${formatError(error)}`);
+      return [];
+    }
+  }
+
   /**
    * Implementation of abstract method from Processor
    * Load tool-specific subagent configurations and parse them into ToolSubagent instances
@@ -257,6 +381,17 @@ export class SubagentsProcessor extends FeatureProcessor {
   }: {
     forDeletion?: boolean;
   } = {}): Promise<ToolFile[]> {
+    if (this.toolTarget === "opencode") {
+      const agentSubagents = await this.loadOpenCodeAgentFiles();
+      logger.debug(`Found ${agentSubagents.length} agent files from registry`);
+
+      const result = forDeletion
+        ? agentSubagents.filter((subagent) => subagent.isDeletable())
+        : agentSubagents;
+
+      return result;
+    }
+
     const factory = this.getFactory(this.toolTarget);
     const paths = factory.class.getSettablePaths({ global: this.global });
 
@@ -280,6 +415,31 @@ export class SubagentsProcessor extends FeatureProcessor {
 
     logger.info(`Successfully loaded ${result.length} ${paths.relativeDirPath} subagents`);
     return result;
+  }
+
+  async writeAiFiles(aiFiles: AiFile[]): Promise<number> {
+    const writtenCount = await super.writeAiFiles(aiFiles);
+
+    if (this.toolTarget === "opencode") {
+      try {
+        const agentSubagents = aiFiles.filter((file): file is OpenCodeSubagent => {
+          if (!(file instanceof OpenCodeSubagent)) {
+            return false;
+          }
+          return file.getAgentEntry() !== undefined;
+        });
+
+        if (agentSubagents.length > 0) {
+          const registryManager = new OpenCodeRegistryManager(this.baseDir);
+          await registryManager.updateAndWriteRegistry(agentSubagents);
+          logger.debug(`Updated registry.json with ${agentSubagents.length} agent entries`);
+        }
+      } catch (error) {
+        logger.warn(`Failed to update registry.json: ${formatError(error)}`);
+      }
+    }
+
+    return writtenCount;
   }
 
   /**

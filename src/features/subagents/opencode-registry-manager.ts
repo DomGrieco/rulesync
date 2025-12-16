@@ -5,7 +5,7 @@ import type {
   OpenCodeAgentRegistry,
   OpenCodeAgentRegistryEntry,
 } from "./opencode-agent-registry.js";
-import type { OpenCodeRule } from "./opencode-rule.js";
+import type { OpenCodeSubagent } from "./opencode-subagent.js";
 
 export class OpenCodeRegistryManager {
   private readonly baseDir: string;
@@ -36,17 +36,16 @@ export class OpenCodeRegistryManager {
     }
   }
 
-  async updateRegistry(agentRules: OpenCodeRule[]): Promise<OpenCodeAgentRegistry> {
+  async updateRegistry(agentSubagents: OpenCodeSubagent[]): Promise<OpenCodeAgentRegistry> {
     const existingRegistry = await this.readRegistry();
 
     const newAgentEntries: OpenCodeAgentRegistryEntry[] = [];
-    for (const rule of agentRules) {
-      const agentEntry = (rule as any).agentEntry as OpenCodeAgentRegistryEntry | undefined;
+    for (const subagent of agentSubagents) {
+      const agentEntry = subagent.getAgentEntry();
       if (!agentEntry) {
         continue;
       }
 
-      const relativeFilePath = rule.getRelativeFilePath();
       const category = agentEntry.category !== undefined ? agentEntry.category : "";
 
       const filePath =
@@ -54,9 +53,10 @@ export class OpenCodeRegistryManager {
           ? `.opencode/agent/${category}/${agentEntry.slug}.md`
           : `.opencode/agent/${agentEntry.slug}.md`;
 
+      const frontmatter = subagent.getFrontmatter();
       const entry: OpenCodeAgentRegistryEntry = {
         slug: agentEntry.slug,
-        name: rule.getDescription() || agentEntry.slug,
+        name: agentEntry.name || frontmatter.description || agentEntry.slug,
         file: filePath,
         category: category,
         capabilities: agentEntry.capabilities,
@@ -86,14 +86,14 @@ export class OpenCodeRegistryManager {
       logger.debug(
         `Updated registry.json at ${this.registryPath} with ${registry.agents.length} agents`,
       );
-    } catch (error) {
-      logger.error(`Failed to write registry.json: ${error}`);
-      throw new Error(`Failed to write registry.json: ${error}`);
-    }
+      } catch (error) {
+        logger.error(`Failed to write registry.json: ${error}`);
+        throw new Error(`Failed to write registry.json: ${error}`, { cause: error });
+      }
   }
 
-  async updateAndWriteRegistry(agentRules: OpenCodeRule[]): Promise<void> {
-    const updatedRegistry = await this.updateRegistry(agentRules);
+  async updateAndWriteRegistry(agentSubagents: OpenCodeSubagent[]): Promise<void> {
+    const updatedRegistry = await this.updateRegistry(agentSubagents);
     await this.writeRegistry(updatedRegistry);
   }
 }
