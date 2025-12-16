@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { RULESYNC_RULES_RELATIVE_DIR_PATH } from "../../constants/rulesync-paths.js";
 import { type AiFileFromFileParams, ValidationResult } from "../../types/ai-file.js";
 import { readFileContent } from "../../utils/file.js";
 import { RulesyncRule } from "./rulesync-rule.js";
@@ -68,7 +69,29 @@ export class OpenCodeRule extends ToolRule {
   }
 
   toRulesyncRule(): RulesyncRule {
-    return this.toRulesyncRuleDefault();
+    const frontmatter: Record<string, unknown> = {
+      root: this.isRoot(),
+      targets: ["opencode"],
+      description: this.description ?? "",
+    };
+
+    if (this.isRoot()) {
+      return new RulesyncRule({
+        baseDir: this.baseDir,
+        relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+        relativeFilePath: OpenCodeRule.getSettablePaths().root.relativeFilePath,
+        frontmatter,
+        body: this.getFileContent(),
+      });
+    }
+
+    return new RulesyncRule({
+      baseDir: this.baseDir,
+      relativeDirPath: RULESYNC_RULES_RELATIVE_DIR_PATH,
+      relativeFilePath: this.getRelativeFilePath(),
+      frontmatter,
+      body: this.getFileContent(),
+    });
   }
 
   validate(): ValidationResult {

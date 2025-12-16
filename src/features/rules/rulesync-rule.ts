@@ -46,6 +46,24 @@ export const RulesyncRuleFrontmatterSchema = z.object({
       excludeAgent: z.optional(z.union([z.literal("code-review"), z.literal("coding-agent")])),
     }),
   ),
+  opencode: z.optional(
+    z.looseObject({
+      category: z.optional(z.string()),
+      mode: z.optional(z.string()),
+      model: z.optional(z.string()),
+      temperature: z.optional(z.number()),
+      topP: z.optional(z.number()),
+      tools: z.optional(z.any()),
+      permission: z.optional(z.any()),
+      color: z.optional(z.string()),
+      maxSteps: z.optional(z.number()),
+      options: z.optional(z.any()),
+      capabilities: z.optional(z.array(z.string())),
+      mcp_servers: z.optional(z.array(z.string())),
+      delegates_to: z.optional(z.array(z.string())),
+      accepts_from: z.optional(z.array(z.string())),
+    }),
+  ),
 });
 
 export type RulesyncRuleFrontmatter = z.infer<typeof RulesyncRuleFrontmatterSchema>;

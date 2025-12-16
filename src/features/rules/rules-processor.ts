@@ -8,6 +8,7 @@ import {
   RULESYNC_RULES_RELATIVE_DIR_PATH,
   RULESYNC_SUBAGENTS_RELATIVE_DIR_PATH,
 } from "../../constants/rulesync-paths.js";
+import { AiFile } from "../../types/ai-file.js";
 import { FeatureProcessor } from "../../types/feature-processor.js";
 import { RulesyncFile } from "../../types/rulesync-file.js";
 import { ToolFile } from "../../types/tool-file.js";
@@ -876,5 +877,9 @@ For example, if the user instructs \`Call planner subagent to plan the refactori
 Simulated skills are specialized capabilities that can be invoked to handle specific types of tasks. When you determine that a skill would be helpful for the current task, read the corresponding SKILL.md file and execute its instructions.
 
 ${toonContent}`;
+  }
+
+  async writeAiFiles(aiFiles: AiFile[]): Promise<number> {
+    return await super.writeAiFiles(aiFiles);
   }
 }

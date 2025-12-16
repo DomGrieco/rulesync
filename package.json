@@ -27,7 +27,8 @@
 	"module": "dist/index.mjs",
 	"types": "dist/index.d.ts",
 	"bin": {
-		"rulesync": "dist/index.js"
+		"rulesync": "dist/index.js",
+		"rulesyncdev": "dist/index.js"
 	},
 	"files": [
 		"dist"
